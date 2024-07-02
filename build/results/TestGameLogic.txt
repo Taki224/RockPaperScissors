@@ -1,0 +1,19 @@
+test/TestGameLogic.c:315:test_valid_id:PASS
+test/TestGameLogic.c:316:test_invalid_id:PASS
+test/TestGameLogic.c:317:test_register_user:PASS
+test/TestGameLogic.c:318:test_create_game:PASS
+test/TestGameLogic.c:319:test_create_multiple_games:PASS
+test/TestGameLogic.c:320:test_join_game:PASS
+test/TestGameLogic.c:321:test_join_multiple_games:PASS
+test/TestGameLogic.c:322:test_get_gameinfo_notstarted:PASS
+test/TestGameLogic.c:323:test_get_gameinfo_started:PASS
+test/TestGameLogic.c:324:test_leaderboard:PASS
+test/TestGameLogic.c:325:test_make_decesion:PASS
+test/TestGameLogic.c:326:test_leaderboard_aftergame:PASS
+test/TestGameLogic.c:327:test_multiple_games_same_time:PASS
+test/TestGameLogic.c:328:test_waiting_rooms:PASS
+test/TestGameLogic.c:329:test_games:PASS
+
+-----------------------
+15 Tests 0 Failures 0 Ignored 
+OK

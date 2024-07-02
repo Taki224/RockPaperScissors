@@ -1,0 +1,1526 @@
+        -:    0:Source:src/gameLogic.c
+        -:    0:Graph:build/objs/gameLogic.gcno
+        -:    0:Data:build/objs/gameLogic.gcda
+        -:    0:Runs:3
+        -:    0:Programs:1
+        -:    1:#include "gameLogic.h"
+        -:    2:
+        -:    3:// Global variable to store every information about games.
+        -:    4:Game games[MAX_GAMES];
+        -:    5:int game_num = 1;
+        -:    6:
+        -:    7:// Global variable to store every information about players.
+        -:    8:Player players[MAX_PLAYERS];
+        -:    9:int num_players = 0;
+        -:   10:
+        -:   11:// Store all the thread IDs
+        -:   12:pthread_t thread_ids[MAX_THREADS];
+        -:   13:int num_threads = 0;
+        -:   14:
+        -:   15:// Mutex and condition variable to synchronize threads
+        -:   16:pthread_mutex_t lock;
+        -:   17:pthread_cond_t cond;
+        -:   18:
+        -:   19:// --------------------------------------------------------
+        -:   20:// ---------------------- SERVER --------------------------
+        -:   21:// --------------------------------------------------------
+        -:   22:
+        -:   23:// Handle SIGINT signal (Ctrl+C)
+    #####:   24:void handle_server_sigint(int sig)
+        -:   25:{
+    #####:   26:    printf("Quitting...\n");
+    #####:   27:    sleep(1);
+    #####:   28:    endThreads();
+    #####:   29:    exit(0);
+        -:   30:}
+        -:   31:
+        -:   32:// Handle SIGTERM signal (kill)
+    #####:   33:void handle_server_sigterm(int sig)
+        -:   34:{
+    #####:   35:    printf("Quitting...\n");
+    #####:   36:    exit(1);
+        -:   37:}
+        -:   38:
+        -:   39:// Initialize mutex and condition variable
+    #####:   40:void setupForThreads(void)
+        -:   41:{
+    #####:   42:    pthread_mutex_init(&lock, NULL);
+    #####:   43:    pthread_cond_init(&cond, NULL);
+    #####:   44:}
+        -:   45:
+        -:   46:// This is called as cleanup function when the program exits
+    #####:   47:void endThreads(void)
+        -:   48:{
+    #####:   49:    pthread_mutex_destroy(&lock);
+    #####:   50:    pthread_cond_destroy(&cond);
+    #####:   51:}
+        -:   52:
+        -:   53:// This is the function that runs on a separate thread to handle a game
+        -:   54:// All the server side game logic is implemented here (waiting for players, all rounds, point calculation, etc.)
+       27:   55:void *startGameServer(void *arg)
+        -:   56:{
+       27:   57:    int game_id = *(int *)arg;
+       27:   58:    free(arg);
+       27:   59:    arg = NULL;
+        -:   60:    // This part is for waiting for players. It waits until a player joins, it gets a signal and checks if the game if full.
+       27:   61:    bool condition = false;
+       27:   62:    do
+        -:   63:    {
+       40:   64:        pthread_mutex_lock(&lock);
+       40:   65:        condition = (games[game_id].num_joined_players == games[game_id].num_players);
+       40:   66:        if (!condition)
+        -:   67:        {
+       11:   68:            pthread_cond_wait(&cond, &lock);
+       11:   69:        }
+       40:   70:        pthread_mutex_unlock(&lock);
+       40:   71:    } while (!condition);
+        -:   72:    // when the game is full it changes the state of the game to started
+       27:   73:    pthread_mutex_lock(&lock);
+       27:   74:    games[game_id].started = true;
+       27:   75:    pthread_mutex_unlock(&lock);
+        -:   76:
+        -:   77:    // The first while loop is for the rounds.
+       27:   78:    bool condition1 = false;
+       27:   79:    bool condition2 = false;
+       27:   80:    do
+        -:   81:    {
+       45:   82:        pthread_mutex_lock(&lock);
+       45:   83:        int current_round = games[game_id].current_round - 1;
+       45:   84:        int decisionsCount = 0;
+       45:   85:        pthread_mutex_unlock(&lock);
+        -:   86:        // This is the loop for one game. It waits until all players make a decision. When a player makes a decision it sends a signal and checks if all players made a decision.
+       45:   87:        do
+        -:   88:        {
+      115:   89:            pthread_mutex_lock(&lock);
+      115:   90:            decisionsCount = 0;
+      329:   91:            for (int i = 0; i < games[game_id].num_players; i++)
+        -:   92:            {
+      214:   93:                if (games[game_id].roundData[current_round][i] != 'n')
+        -:   94:                {
+       84:   95:                    decisionsCount++;
+       84:   96:                }
+      214:   97:            }
+      115:   98:            condition1 = decisionsCount < games[game_id].num_players;
+      115:   99:            if (condition1)
+        -:  100:            {
+        -:  101:                // Wait for signal from the function that handles new moves.
+       80:  102:                pthread_cond_wait(&cond, &lock);
+       80:  103:            }
+      115:  104:            pthread_mutex_unlock(&lock);
+      115:  105:        } while (condition1);
+        -:  106:        // When a round is finished it calculates the points for each player.
+       45:  107:        pthread_mutex_lock(&lock);
+       99:  108:        for (int i = 0; i < games[game_id].num_players; i++)
+        -:  109:        {
+      162:  110:            for (int j = 0; j < games[game_id].num_players; j++)
+        -:  111:            {
+      108:  112:                if (i != j)
+        -:  113:                {
+       54:  114:                    if (games[game_id].roundData[current_round][i] == 'p')
+        -:  115:                    {
+       27:  116:                        if (games[game_id].roundData[current_round][j] == 'r')
+        -:  117:                        {
+       27:  118:                            games[game_id].playerScores[i]++;
+       27:  119:                        }
+       27:  120:                    }
+       54:  121:                    if (games[game_id].roundData[current_round][i] == 'r')
+        -:  122:                    {
+       27:  123:                        if (games[game_id].roundData[current_round][j] == 's')
+        -:  124:                        {
+    #####:  125:                            games[game_id].playerScores[i]++;
+    #####:  126:                        }
+       27:  127:                    }
+       54:  128:                    if (games[game_id].roundData[current_round][i] == 's')
+        -:  129:                    {
+    #####:  130:                        if (games[game_id].roundData[current_round][j] == 'p')
+        -:  131:                        {
+    #####:  132:                            games[game_id].playerScores[i]++;
+    #####:  133:                        }
+    #####:  134:                    }
+       54:  135:                }
+      108:  136:            }
+       54:  137:        }
+        -:  138:        // Go to the next round
+       45:  139:        games[game_id].current_round++;
+        -:  140:
+        -:  141:        // check if game is finished
+       45:  142:        condition2 = games[game_id].current_round > games[game_id].num_rounds;
+        -:  143:
+       45:  144:        pthread_mutex_unlock(&lock);
+       45:  145:    } while (!condition2);
+        -:  146:    // when game ends
+       27:  147:    pthread_mutex_lock(&lock);
+       27:  148:    games[game_id].active = false;
+        -:  149:    // add points to the players sum of points
+        -:  150:    // add 1 to the players sum of matches
+       45:  151:    for (int i = 0; i < games[game_id].num_players; i++)
+        -:  152:    {
+       30:  153:        for (int j = 0; j < num_players; j++)
+        -:  154:        {
+       30:  155:            if (strcmp(games[game_id].playerNames[i], players[j].name) == 0)
+        -:  156:            {
+       18:  157:                players[j].score += games[game_id].playerScores[i];
+       18:  158:                players[j].matches++;
+       18:  159:                break;
+        -:  160:            }
+       12:  161:        }
+       18:  162:    }
+       27:  163:    pthread_mutex_unlock(&lock);
+       27:  164:    return NULL;
+        -:  165:}
+        -:  166:
+        -:  167:// This function is called when the server receives a command to create a new game
+        -:  168:// It initializes the game struct and starts a new thread to handle the game
+       45:  169:void createNewGameServer(int player_num, int num_rounds)
+        -:  170:{
+       45:  171:    pthread_mutex_lock(&lock);
+       45:  172:    games[game_num].id = game_num;
+       45:  173:    games[game_num].num_players = player_num;
+       45:  174:    games[game_num].num_rounds = num_rounds;
+       45:  175:    games[game_num].current_round = 1;
+       45:  176:    games[game_num].started = false;
+       45:  177:    games[game_num].active = true;
+       45:  178:    games[game_num].num_joined_players = 0;
+       45:  179:    games[game_num].num_current_round = 0;
+      270:  180:    for (int i = 0; i < 5; i++)
+        -:  181:    {
+      225:  182:        games[game_num].playerNames[i] = NULL;
+        -:  183:        // If a player made a decision it will be put at the correct index in the roundData string. If not, it will be 'n'.
+      225:  184:        games[game_num].roundData[i] = (char *)"nnnnn";
+      225:  185:        games[game_num].playerScores[i] = 0;
+      225:  186:    }
+       45:  187:    pthread_mutex_unlock(&lock);
+        -:  188:
+       45:  189:    int *game_id_ptr = malloc(sizeof(int));
+       45:  190:    if (game_id_ptr == NULL)
+        -:  191:    {
+    #####:  192:        fprintf(stderr, "Error allocating memory\n");
+    #####:  193:        return;
+        -:  194:    }
+       45:  195:    *game_id_ptr = game_num;
+        -:  196:    // Start game on new thread
+        -:  197:    pthread_t thread_id;
+       45:  198:    if (pthread_create(&thread_id, NULL, startGameServer, game_id_ptr))
+        -:  199:    {
+    #####:  200:        fprintf(stderr, "Error creating thread\n");
+        -:  201:        // Free the allocated memory if thread creation fails
+    #####:  202:        free(game_id_ptr);
+    #####:  203:        game_id_ptr = NULL;
+    #####:  204:        return;
+        -:  205:    }
+        -:  206:    // Store the thread ID
+       45:  207:    thread_ids[num_threads] = thread_id;
+       45:  208:    num_threads++;
+        -:  209:
+        -:  210:    // Detach the thread since we won't be joining it, it runs on its own until the game ends and reads from the global variables
+       45:  211:    pthread_detach(thread_id);
+        -:  212:
+       45:  213:    game_num++;
+       45:  214:}
+        -:  215:
+        -:  216:// This function is called when the server receives a command to get the game info
+        -:  217:// It returns a string containing all the information about the game
+        -:  218:// Format: GI;<num_players>;<player1>,<player2>,...;<current_round>,<num_rounds>;<player1_score>,<player2_score>,...;<round1_data>,<round2_data>,...
+        9:  219:char *getGameInfo(int game_id)
+        -:  220:{
+        9:  221:    pthread_mutex_lock(&lock);
+        9:  222:    char *game_info = malloc(BUFSIZ * sizeof(char));
+        9:  223:    if (game_info == NULL)
+        -:  224:    {
+    #####:  225:        fprintf(stderr, "Error allocating memory\n");
+    #####:  226:        return NULL;
+        -:  227:    }
+        -:  228:    // check if game is started
+        9:  229:    if (!games[game_id].started)
+        -:  230:    {
+        3:  231:        game_info[0] = '\0';
+        3:  232:        strcat(game_info, "notstarted");
+        3:  233:        return game_info;
+        -:  234:    }
+        -:  235:    else
+        -:  236:    {
+        6:  237:        game_info[0] = '\0';
+        -:  238:    }
+        -:  239:    // Cat all the information about the game to the game_info string
+        6:  240:    sprintf(game_info, "GI;%d;", games[game_id].num_players);
+        -:  241:
+       18:  242:    for (int i = 0; i < games[game_id].num_players; i++)
+        -:  243:    {
+       12:  244:        strcat(game_info, games[game_id].playerNames[i]);
+       12:  245:        if (i < games[game_id].num_players - 1)
+        -:  246:        {
+        6:  247:            strcat(game_info, ",");
+        6:  248:        }
+       12:  249:    }
+        -:  250:
+        6:  251:    strcat(game_info, ";");
+        6:  252:    sprintf(game_info, "%s%d,%d;", game_info, games[game_id].current_round, games[game_id].num_rounds);
+       18:  253:    for (int i = 0; i < games[game_id].num_players; i++)
+        -:  254:    {
+       12:  255:        sprintf(game_info, "%s%d", game_info, games[game_id].playerScores[i]);
+       12:  256:        if (i < games[game_id].num_players - 1)
+        -:  257:        {
+        6:  258:            strcat(game_info, ",");
+        6:  259:        }
+       12:  260:    }
+        -:  261:
+        6:  262:    strcat(game_info, ";");
+       12:  263:    for (int i = 0; i < games[game_id].current_round; i++)
+        -:  264:    {
+        6:  265:        strncat(game_info, games[game_id].roundData[i], games[game_id].num_players);
+        6:  266:        if (i < games[game_id].current_round - 1)
+        -:  267:        {
+    #####:  268:            strcat(game_info, ",");
+    #####:  269:        }
+        6:  270:    }
+        6:  271:    strcat(game_info, ";");
+        -:  272:
+        6:  273:    pthread_mutex_unlock(&lock);
+        6:  274:    return game_info;
+        9:  275:}
+        -:  276:
+        -:  277:// This function is called when the server receives a command to register a new client
+       57:  278:bool registerClient(char *client_name)
+        -:  279:{
+        -:  280:    // check if name is already taken
+       57:  281:    pthread_mutex_lock(&lock);
+      105:  282:    for (int i = 0; i < num_players; i++)
+        -:  283:    {
+       48:  284:        if (strcmp(players[i].name, client_name) == 0)
+        -:  285:        {
+    #####:  286:            pthread_mutex_unlock(&lock);
+    #####:  287:            return false;
+        -:  288:        }
+       48:  289:    }
+        -:  290:    // If not store the new player in the players array
+       57:  291:    strncpy(players[num_players].name, client_name, sizeof(players[num_players].name));
+       57:  292:    players[num_players].score = 0;
+       57:  293:    players[num_players].matches = 0;
+       57:  294:    num_players++;
+       57:  295:    pthread_mutex_unlock(&lock);
+       57:  296:    return true;
+       57:  297:}
+        -:  298:
+        -:  299:// This function is called when the server receives a command to get the leaderboard
+        9:  300:char *getLeaderBoard(void)
+        -:  301:{
+        9:  302:    char *players_string = malloc(BUFSIZ * sizeof(char));
+        9:  303:    if (players_string == NULL)
+        -:  304:    {
+    #####:  305:        fprintf(stderr, "Error allocating memory\n");
+    #####:  306:        return NULL;
+        -:  307:    }
+        9:  308:    players_string[0] = '\0';
+        9:  309:    pthread_mutex_lock(&lock);
+        -:  310:    // Put the information about player points and matches in the players_string
+       30:  311:    for (int i = 0; i < num_players; i++)
+        -:  312:    {
+        -:  313:        char player_string[BUFSIZ];
+       21:  314:        snprintf(player_string, sizeof(player_string), "%s,%d,%d;", players[i].name, players[i].score, players[i].matches);
+       21:  315:        strcat(players_string, player_string);
+       21:  316:    }
+        9:  317:    pthread_mutex_unlock(&lock);
+        9:  318:    return players_string;
+        9:  319:}
+        -:  320:
+        -:  321:// This function is called when the server receives a command to join a game
+       57:  322:bool joinGame(int game_id, char *client_name)
+        -:  323:{
+       57:  324:    pthread_mutex_lock(&lock);
+        -:  325:    // check if game is started. If it already started no player can join
+       57:  326:    if (games[game_id].started)
+        -:  327:    {
+    #####:  328:        pthread_mutex_unlock(&lock);
+    #####:  329:        return false;
+        -:  330:    }
+        -:  331:    else
+        -:  332:    {
+       57:  333:        games[game_id].playerNames[games[game_id].num_joined_players] = strdup(client_name);
+       57:  334:        games[game_id].num_joined_players++;
+        -:  335:        // If a player joined send a signal to the thread that handles the game
+        -:  336:        // All threads get the signal but it only affects the thread that handles the game since it checks if the game is full
+       57:  337:        pthread_cond_broadcast(&cond);
+       57:  338:        pthread_mutex_unlock(&lock);
+       57:  339:        return true;
+        -:  340:    }
+       57:  341:}
+        -:  342:
+        -:  343:// This function is called when the server receives a command to list the waiting games
+       15:  344:char *listWaitingGames(char *client_name)
+        -:  345:{
+       15:  346:    char *games_string = malloc(BUFSIZ * sizeof(char));
+       15:  347:    if (games_string == NULL)
+        -:  348:    {
+    #####:  349:        fprintf(stderr, "Error allocating memory\n");
+    #####:  350:        return NULL;
+        -:  351:    }
+       15:  352:    games_string[0] = '\0';
+       15:  353:    pthread_mutex_lock(&lock);
+     1515:  354:    for (int i = 0; i < MAX_GAMES; i++)
+        -:  355:    {
+     1500:  356:        if (games[i].active && !games[i].started)
+        -:  357:        {
+        -:  358:            // check if client is not joined yet
+        -:  359:            // The client can only see the games that he is not joined yet and it is not started yet
+       12:  360:            bool joined = false;
+        -:  361:            // The already joined players are stored in the playerNames array
+       12:  362:            for (int j = 0; j < games[i].num_joined_players; j++)
+        -:  363:            {
+        6:  364:                if (strcmp(games[i].playerNames[j], client_name) == 0)
+        -:  365:                {
+        6:  366:                    joined = true;
+        6:  367:                    break;
+        -:  368:                }
+    #####:  369:            }
+        -:  370:            // Cat all the games that the client can join to the games_string
+       12:  371:            if (!joined)
+        -:  372:            {
+        -:  373:                char buffer[3];
+        6:  374:                sprintf(buffer, "%d", i);
+        6:  375:                strcat(games_string, buffer);
+        6:  376:                strcat(games_string, ",");
+        6:  377:            }
+       12:  378:        }
+     1500:  379:    }
+       15:  380:    pthread_mutex_unlock(&lock);
+       15:  381:    return games_string;
+       15:  382:}
+        -:  383:
+        -:  384:// This function is called when the server receives a command to list the games
+        -:  385:// It is the opposite of the listWaitingGames function. It only shows the games that the client is already joined
+        6:  386:char *listGames(char *client_name)
+        -:  387:{
+        6:  388:    char *games_string = malloc(BUFSIZ * sizeof(char));
+        6:  389:    if (games_string == NULL)
+        -:  390:    {
+    #####:  391:        fprintf(stderr, "Error allocating memory\n");
+    #####:  392:        return NULL;
+        -:  393:    }
+        6:  394:    games_string[0] = '\0';
+        6:  395:    pthread_mutex_lock(&lock);
+      606:  396:    for (int i = 0; i < MAX_GAMES; i++)
+        -:  397:    {
+      600:  398:        if (games[i].active)
+        -:  399:        {
+        -:  400:            // check if client is joined
+        6:  401:            bool joined = false;
+        -:  402:            // The already joined players are stored in the playerNames array
+        6:  403:            for (int j = 0; j < games[i].num_joined_players; j++)
+        -:  404:            {
+        3:  405:                if (strcmp(games[i].playerNames[j], client_name) == 0)
+        -:  406:                {
+        3:  407:                    joined = true;
+        3:  408:                    break;
+        -:  409:                }
+    #####:  410:            }
+        -:  411:            // Cat all the games that the client is joined to the games_string
+        6:  412:            if (joined)
+        -:  413:            {
+        -:  414:                char buffer[3];
+        3:  415:                sprintf(buffer, "%d", i);
+        3:  416:                strcat(games_string, buffer);
+        3:  417:                strcat(games_string, ",");
+        3:  418:            }
+        6:  419:        }
+      600:  420:    }
+        6:  421:    pthread_mutex_unlock(&lock);
+        6:  422:    return games_string;
+        6:  423:}
+        -:  424:
+        -:  425:// This function is called when the server receives a command to make a decision
+       57:  426:void makeDecision(char *game_id_string, char *decision_string, char *client_name)
+        -:  427:{
+       57:  428:    if (game_id_string == NULL || decision_string == NULL)
+        -:  429:    {
+    #####:  430:        printf("Error: Invalid command format\n");
+    #####:  431:    }
+       57:  432:    int game_id = atoi(game_id_string);
+       57:  433:    pthread_mutex_lock(&lock);
+       57:  434:    int current_round = games[game_id].current_round - 1;
+       57:  435:    int player_index = -1;
+        -:  436:    // Find the index of the player in the playerNames array
+       84:  437:    for (int i = 0; i < games[game_id].num_players; i++)
+        -:  438:    {
+       84:  439:        if (strcmp(games[game_id].playerNames[i], client_name) == 0)
+        -:  440:        {
+       57:  441:            player_index = i;
+       57:  442:            break;
+        -:  443:        }
+       27:  444:    }
+        -:  445:    // Modify the roundData string at the correct index
+       57:  446:    char *playerDecisionsCopy = strdup(games[game_id].roundData[current_round]);
+       57:  447:    if (playerDecisionsCopy == NULL)
+        -:  448:    {
+    #####:  449:        fprintf(stderr, "Memory allocation failed\n");
+    #####:  450:        exit(EXIT_FAILURE);
+        -:  451:    }
+       57:  452:    playerDecisionsCopy[player_index] = decision_string[0];
+       57:  453:    games[game_id].roundData[current_round] = playerDecisionsCopy;
+        -:  454:    // Send a signal to the thread that handles the game
+       57:  455:    pthread_cond_broadcast(&cond);
+       57:  456:    pthread_mutex_unlock(&lock);
+       57:  457:}
+        -:  458:
+        -:  459:// This function initializes the server
+    #####:  460:void server(void)
+        -:  461:{
+        -:  462:    // Create all necessary data for the server to start
+    #####:  463:    setupForThreads();
+        -:  464:
+        -:  465:    int pipe_fd;
+        -:  466:    char buf[BUFSIZ];
+        -:  467:
+        -:  468:    /* create the FIFO (named pipe) */
+    #####:  469:    mkfifo(FIFO_FILE, 0666);
+        -:  470:
+    #####:  471:    printf("Server ON.\n");
+        -:  472:
+    #####:  473:    signal(SIGTERM, handle_server_sigterm); // Register the SIGTERM signal handler
+    #####:  474:    signal(SIGINT, handle_server_sigint);   // Register the SIGINT signal handler
+        -:  475:
+    #####:  476:    while (true)
+        -:  477:    {
+        -:  478:        // Continuously read from the pipe
+    #####:  479:        pipe_fd = open(FIFO_FILE, O_RDONLY);
+    #####:  480:        if (read(pipe_fd, buf, BUFSIZ) > 0)
+        -:  481:        {
+        -:  482:            // Print the received message
+    #####:  483:            printf("%s\n", buf);
+        -:  484:            // Split the message into client_id and command
+        -:  485:            char *saveptr1;
+    #####:  486:            char *client_name = strtok_r(buf, ": ", &saveptr1);
+    #####:  487:            char *command = strtok_r(NULL, ": ", &saveptr1);
+        -:  488:            // Check what action the client wants to do
+    #####:  489:            if (strcmp(command, "C") == 0)
+        -:  490:            {
+        -:  491:                // This is for when a new client wants to register
+    #####:  492:                bool registered = false;
+        -:  493:                // Check if the name is already taken
+    #####:  494:                registered = registerClient(client_name);
+        -:  495:                char message[BUFSIZ];
+    #####:  496:                message[0] = '\0';
+        -:  497:                // Send a message to the client if the registration was successful or not
+    #####:  498:                if (registered)
+        -:  499:                {
+    #####:  500:                    strcpy(message, "registered");
+    #####:  501:                }
+        -:  502:                else
+        -:  503:                {
+    #####:  504:                    strcpy(message, "notregistered");
+        -:  505:                }
+        -:  506:
+        -:  507:                // Create a unique FIFO for the client
+        -:  508:                char client_fifo[BUFSIZ];
+    #####:  509:                snprintf(client_fifo, sizeof(client_fifo), "/tmp/my_fifo_response_%s", client_name);
+    #####:  510:                mkfifo(client_fifo, 0666);
+    #####:  511:                int pipe_fd_response = open(client_fifo, O_WRONLY);
+    #####:  512:                write(pipe_fd_response, message, strlen(message) + 1);
+    #####:  513:                close(pipe_fd_response);
+    #####:  514:            }
+    #####:  515:            if (strcmp(command, "4L") == 0)
+        -:  516:            {
+        -:  517:                // This is for when a client wants to get the leaderboard
+        -:  518:
+        -:  519:                // Get the leaderboard string and send it to the client
+    #####:  520:                char *players_string = getLeaderBoard();
+        -:  521:
+        -:  522:                // Create a unique FIFO for the client
+        -:  523:                char client_fifo[BUFSIZ];
+    #####:  524:                snprintf(client_fifo, sizeof(client_fifo), "/tmp/my_fifo_response_%s", client_name);
+    #####:  525:                mkfifo(client_fifo, 0666);
+        -:  526:
+    #####:  527:                int pipe_fd_response = open(client_fifo, O_WRONLY);
+    #####:  528:                write(pipe_fd_response, players_string, strlen(players_string) + 1);
+    #####:  529:                close(pipe_fd_response);
+    #####:  530:                free(players_string);
+    #####:  531:                players_string = NULL;
+    #####:  532:            }
+    #####:  533:            if (strncmp(command, "NG", 2) == 0)
+        -:  534:            {
+        -:  535:                // This is for when a client wants to create a new game
+    #####:  536:                char *command_copy = strdup(command);
+    #####:  537:                char *token = strtok_r(command_copy, ",", &saveptr1);
+        -:  538:
+    #####:  539:                if (token && strncmp(token, "NG", 2) == 0)
+        -:  540:                {
+    #####:  541:                    char *num_players_string = strtok_r(NULL, ",", &saveptr1);
+    #####:  542:                    char *num_rounds_string = strtok_r(NULL, ",", &saveptr1);
+    #####:  543:                    if (num_players_string == NULL || num_rounds_string == NULL)
+        -:  544:                    {
+    #####:  545:                        printf("Error: Invalid command format\n");
+    #####:  546:                        continue;
+        -:  547:                    }
+    #####:  548:                    int players_num = atoi(num_players_string);
+    #####:  549:                    int num_rounds = atoi(num_rounds_string);
+    #####:  550:                    createNewGameServer(players_num, num_rounds);
+    #####:  551:                }
+    #####:  552:                free(command_copy);
+    #####:  553:                command_copy = NULL;
+    #####:  554:            }
+    #####:  555:            if (strcmp(command, "SW") == 0)
+        -:  556:            {
+        -:  557:                // This is for when a client wants to list the waiting games
+    #####:  558:                char *games_string = listWaitingGames(client_name);
+        -:  559:
+        -:  560:                char client_fifo[BUFSIZ];
+    #####:  561:                snprintf(client_fifo, sizeof(client_fifo), "/tmp/my_fifo_response_%s", client_name);
+    #####:  562:                mkfifo(client_fifo, 0666);
+    #####:  563:                int pipe_fd_response = open(client_fifo, O_WRONLY);
+    #####:  564:                write(pipe_fd_response, games_string, strlen(games_string) + 1);
+    #####:  565:                close(pipe_fd_response);
+    #####:  566:                free(games_string);
+    #####:  567:                games_string = NULL;
+    #####:  568:            }
+    #####:  569:            if (strncmp(command, "JG", 2) == 0)
+        -:  570:            {
+        -:  571:                // This is for when a client wants to join a game
+    #####:  572:                char *command_copy = strdup(command);
+    #####:  573:                char *token = strtok_r(command_copy, ",", &saveptr1);
+        -:  574:
+    #####:  575:                if (token && strncmp(token, "JG", 2) == 0)
+        -:  576:                {
+    #####:  577:                    char *game_id_string = strtok_r(NULL, ",", &saveptr1);
+        -:  578:                    char response[BUFSIZ];
+    #####:  579:                    response[0] = '\0';
+        -:  580:                    // Check if it is possible to join the game
+        -:  581:                    // Send a message to the client if the join was successful or not
+    #####:  582:                    if (joinGame(atoi(game_id_string), client_name))
+        -:  583:                    {
+    #####:  584:                        strcat(response, "joined");
+    #####:  585:                    }
+        -:  586:                    else
+        -:  587:                    {
+    #####:  588:                        strcat(response, "notjoined");
+        -:  589:                    }
+        -:  590:
+        -:  591:                    char client_fifo[BUFSIZ];
+    #####:  592:                    snprintf(client_fifo, sizeof(client_fifo), "/tmp/my_fifo_response_%s", client_name);
+    #####:  593:                    mkfifo(client_fifo, 0666);
+    #####:  594:                    int pipe_fd_response = open(client_fifo, O_WRONLY);
+    #####:  595:                    write(pipe_fd_response, response, strlen(response) + 1);
+    #####:  596:                    close(pipe_fd_response);
+    #####:  597:                }
+    #####:  598:                free(command_copy);
+    #####:  599:                command_copy = NULL;
+    #####:  600:            }
+    #####:  601:            if (strcmp(command, "SG") == 0)
+        -:  602:            {
+        -:  603:                // This is for when a client wants to get the list of games that he is joined
+    #####:  604:                char *games_string = listGames(client_name);
+        -:  605:
+        -:  606:                char client_fifo[BUFSIZ];
+    #####:  607:                snprintf(client_fifo, sizeof(client_fifo), "/tmp/my_fifo_response_%s", client_name);
+    #####:  608:                mkfifo(client_fifo, 0666);
+    #####:  609:                int pipe_fd_response = open(client_fifo, O_WRONLY);
+    #####:  610:                write(pipe_fd_response, games_string, strlen(games_string) + 1);
+    #####:  611:                close(pipe_fd_response);
+    #####:  612:                free(games_string);
+    #####:  613:                games_string = NULL;
+    #####:  614:            }
+    #####:  615:            if (strncmp(command, "GI", 2) == 0)
+        -:  616:            {
+        -:  617:                // This is for when a client wants to get the information about a game
+    #####:  618:                char *command_copy = strdup(command);
+    #####:  619:                char *token = strtok_r(command_copy, ",", &saveptr1);
+        -:  620:
+    #####:  621:                if (token && strncmp(token, "GI", 2) == 0)
+        -:  622:                {
+    #####:  623:                    char *game_id_string = strtok_r(NULL, ",", &saveptr1);
+    #####:  624:                    if (game_id_string == NULL)
+        -:  625:                    {
+    #####:  626:                        printf("Error: Invalid command format\n");
+    #####:  627:                        continue;
+        -:  628:                    }
+    #####:  629:                    int game_id = atoi(game_id_string);
+        -:  630:                    char response[BUFSIZ];
+    #####:  631:                    response[0] = '\0';
+        -:  632:
+        -:  633:                    // Get the game info string and send it to the client
+    #####:  634:                    char *game_info = getGameInfo(game_id);
+        -:  635:                    // If the game not started yet send that instead of the game info string
+    #####:  636:                    if (strcmp(game_info, "notstarted") == 0)
+        -:  637:                    {
+    #####:  638:                        strcat(response, "notstarted");
+    #####:  639:                    }
+        -:  640:                    else
+        -:  641:                    {
+    #####:  642:                        strncat(response, game_info, BUFSIZ - strlen(response) - 1);
+        -:  643:                    }
+    #####:  644:                    free(game_info);
+    #####:  645:                    game_info = NULL;
+        -:  646:
+        -:  647:                    char client_fifo[BUFSIZ];
+    #####:  648:                    snprintf(client_fifo, sizeof(client_fifo), "/tmp/my_fifo_response_%s", client_name);
+    #####:  649:                    mkfifo(client_fifo, 0666);
+    #####:  650:                    int pipe_fd_response = open(client_fifo, O_WRONLY);
+    #####:  651:                    write(pipe_fd_response, response, strlen(response) + 1);
+    #####:  652:                    close(pipe_fd_response);
+    #####:  653:                }
+    #####:  654:                free(command_copy);
+    #####:  655:                command_copy = NULL;
+    #####:  656:            }
+    #####:  657:            if (strncmp(command, "MD", 2) == 0)
+        -:  658:            {
+        -:  659:                // This is for when a client wants to make a decision
+    #####:  660:                char *command_copy = strdup(command);
+    #####:  661:                char *token = strtok_r(command_copy, ",", &saveptr1);
+        -:  662:                // Get all necessary information from the command string and call the makeDecision function
+    #####:  663:                if (token && strncmp(token, "MD", 2) == 0)
+        -:  664:                {
+    #####:  665:                    char *game_id_string = strtok_r(NULL, ",", &saveptr1);
+    #####:  666:                    char *decision_string = strtok_r(NULL, ",", &saveptr1);
+    #####:  667:                    makeDecision(game_id_string, decision_string, client_name);
+    #####:  668:                }
+    #####:  669:            }
+    #####:  670:        }
+        -:  671:
+    #####:  672:        close(pipe_fd);
+        -:  673:    }
+        -:  674:}
+        -:  675:
+        -:  676:// --------------------------------------------------------
+        -:  677:// ---------------------- CLIENT --------------------------
+        -:  678:// --------------------------------------------------------
+        -:  679:
+        -:  680:int pipe_fd;
+        -:  681:const char *client_id;
+        -:  682:
+        -:  683:// Handle SIGINT signal (Ctrl+C)
+    #####:  684:void handle_client_sigint(int sig)
+        -:  685:{
+    #####:  686:    clear();
+    #####:  687:    printw("Quitting...\n");
+    #####:  688:    refresh();
+    #####:  689:    sleep(1);
+    #####:  690:    endwin();
+    #####:  691:    system("reset");
+    #####:  692:    exit(0);
+        -:  693:}
+        -:  694:// Handle SIGTERM signal (kill)
+    #####:  695:void handle_client_sigterm(int sig)
+        -:  696:{
+    #####:  697:    clear();
+    #####:  698:    printw("Quitting...\n");
+    #####:  699:    refresh();
+    #####:  700:    exit(1);
+        -:  701:}
+        -:  702:
+        -:  703:// Handle SIGPIPE signal. This occurs when the server is closed while the client is running.
+    #####:  704:void handle_sigpipe(int sig)
+        -:  705:{
+    #####:  706:    clear();
+    #####:  707:    printw("Connection to server failed.\n");
+    #####:  708:    printw("Quitting...\n");
+    #####:  709:    refresh();
+    #####:  710:    sleep(2);
+    #####:  711:    endwin();
+    #####:  712:    exit(1);
+        -:  713:}
+        -:  714:
+        -:  715:// This function is used to send a command to the server
+    #####:  716:void commandSender(const char *command)
+        -:  717:{
+        -:  718:    char message[BUFSIZ + 256];
+        -:  719:
+        -:  720:    // Cat the command to the client id so the server knows which client sent the command
+    #####:  721:    snprintf(message, sizeof(message), "%s: %s", client_id, command);
+        -:  722:
+        -:  723:    // Write the formatted message to the pipe
+    #####:  724:    write(pipe_fd, message, strlen(message) + 1);
+    #####:  725:}
+        -:  726:
+        -:  727:// This function is used to read the response from the server. It is called every time a client expects a response.
+    #####:  728:char *readFromServer(void)
+        -:  729:{
+        -:  730:    int pipe_fd_response;
+        -:  731:    char buf[BUFSIZ];
+    #####:  732:    char *message = malloc(BUFSIZ * sizeof(char));
+    #####:  733:    if (message == NULL)
+        -:  734:    {
+    #####:  735:        fprintf(stderr, "Memory allocation failed\n");
+    #####:  736:        exit(EXIT_FAILURE);
+        -:  737:    }
+        -:  738:
+        -:  739:    // Construct the name of the dedicated pipe using the client's ID
+        -:  740:    char fifo_file_response[BUFSIZ];
+    #####:  741:    sprintf(fifo_file_response, "/tmp/my_fifo_response_%s", client_id);
+        -:  742:
+        -:  743:    // Open the dedicated pipe for reading
+    #####:  744:    pipe_fd_response = open(fifo_file_response, O_RDONLY);
+    #####:  745:    if (read(pipe_fd_response, buf, BUFSIZ) > 0)
+        -:  746:    {
+        -:  747:        // Since this is a dedicated pipe, we don't need to check if the message is for this client
+    #####:  748:        strcpy(message, buf);
+    #####:  749:    }
+    #####:  750:    close(pipe_fd_response);
+    #####:  751:    return message;
+        -:  752:}
+        -:  753:
+        -:  754:// This function checks if the client id is valid
+        9:  755:int is_valid_id(const char *id)
+        -:  756:{
+        -:  757:    // The client id must be a maximum of 5 characters and contain only numbers and letters
+        9:  758:    if (strlen(id) > 5)
+        -:  759:    {
+        3:  760:        return 0;
+        -:  761:    }
+       27:  762:    while (*id)
+        -:  763:    {
+       21:  764:        if (!isalnum((unsigned char)*id))
+        -:  765:        {
+    #####:  766:            return 0;
+        -:  767:        }
+       21:  768:        id++;
+        -:  769:    }
+        6:  770:    return 1;
+        9:  771:}
+        -:  772:
+        -:  773:// This function dispays the menu and handles the user input
+    #####:  774:void showMenu(void)
+        -:  775:{
+    #####:  776:    clear(); // Clear the console
+    #####:  777:    printw("1 - Create a new game\n");
+    #####:  778:    printw("2 - Current games\n");
+    #####:  779:    printw("3 - Waiting room\n");
+    #####:  780:    printw("4 - Show leaderboard\n");
+    #####:  781:    printw("\n");
+    #####:  782:    printw("q - Quit\n");
+    #####:  783:    refresh(); // Refresh the screen to apply changes
+    #####:  784:    bool quit = false;
+    #####:  785:    do
+        -:  786:    {
+        -:  787:        // Wait for a key press
+    #####:  788:        char command = (char)getch();
+        -:  789:        // Based on the key pressed do the corresponding action
+    #####:  790:        switch (command)
+        -:  791:        {
+        -:  792:        case '1':
+    #####:  793:            createNewGame();
+    #####:  794:            quit = true;
+    #####:  795:            break;
+        -:  796:        case '2':
+    #####:  797:            quit = true;
+    #####:  798:            showCurrentGames();
+    #####:  799:            break;
+        -:  800:        case '3':
+    #####:  801:            quit = true;
+    #####:  802:            displayWaitingRooms(false, 0, NULL);
+    #####:  803:            break;
+        -:  804:        case '4':
+    #####:  805:            quit = true;
+    #####:  806:            showLeaderboard();
+    #####:  807:            break;
+        -:  808:        case 'q':
+    #####:  809:            handle_client_sigint(0);
+    #####:  810:            quit = true;
+    #####:  811:            break;
+        -:  812:        default:
+    #####:  813:            break;
+        -:  814:        }
+    #####:  815:    } while (!quit);
+    #####:  816:}
+        -:  817:
+        -:  818:// This is the option 3 from the menu. It displays the waiting rooms.
+    #####:  819:void displayWaitingRooms(bool prevJoined, int prevJoinedId, bool cantjoin)
+        -:  820:{
+    #####:  821:    clear();
+    #####:  822:    printw("Here's the list of games you can join:\n");
+        -:  823:    int game_ids[BUFSIZ];
+    #####:  824:    int games_count = 0;
+        -:  825:
+    #####:  826:    usleep(100000);
+        -:  827:    // Send the command to the server to get the list of waiting games
+    #####:  828:    commandSender("SW");
+        -:  829:    // Read the response from the server using the readFromServer function
+    #####:  830:    char *message = readFromServer();
+        -:  831:    char *saveptr1;
+    #####:  832:    char *token = strtok_r(message, ",", &saveptr1);
+    #####:  833:    while (token != NULL)
+        -:  834:    {
+    #####:  835:        game_ids[games_count] = atoi(token);
+    #####:  836:        games_count++;
+    #####:  837:        token = strtok_r(NULL, ",", &saveptr1);
+        -:  838:    }
+        -:  839:    // If the string is empty there are no games to join
+    #####:  840:    if (games_count == 0)
+        -:  841:    {
+    #####:  842:        printw("\n");
+    #####:  843:        printw("Sorry. There are no games you can join");
+    #####:  844:        printw("\n");
+    #####:  845:    }
+        -:  846:    else
+        -:  847:    {
+    #####:  848:        printw("\n");
+        -:  849:    }
+        -:  850:    // Print the list of games, assign a number key to each game
+    #####:  851:    for (int i = 0; i < games_count; i++)
+        -:  852:    {
+    #####:  853:        printw("%d - Game #%d\n", i + 1, game_ids[i]);
+    #####:  854:    }
+        -:  855:    // Check if the client tried to join a game and display a message accordingly
+        -:  856:    // If there client already wanted to join the game the displaying is different
+    #####:  857:    if (prevJoined)
+        -:  858:    {
+        -:  859:        // check if the previous join was successful or not
+    #####:  860:        if (cantjoin == 1)
+        -:  861:        {
+    #####:  862:            printw("\n");
+    #####:  863:            printw(">>> You cannot join Game #%d <<<\n", prevJoinedId);
+    #####:  864:        }
+    #####:  865:        else if (cantjoin == 0)
+        -:  866:        {
+    #####:  867:            printw("\n");
+    #####:  868:            printw(">>> You joined Game #%d <<<\n", prevJoinedId);
+    #####:  869:        }
+    #####:  870:    }
+    #####:  871:    printw("\n");
+    #####:  872:    printw("b - Back\n");
+    #####:  873:    refresh();
+    #####:  874:    bool quit = false;
+    #####:  875:    free(message);
+    #####:  876:    message = NULL;
+    #####:  877:    do
+        -:  878:    {
+    #####:  879:        char command = (char)getch();
+    #####:  880:        if (command == 'b')
+        -:  881:        {
+    #####:  882:            showMenu();
+    #####:  883:            quit = true;
+    #####:  884:        }
+    #####:  885:        int commandInt = command - '0';
+        -:  886:        // Check if the key pressed is a number key and if it is a valid number key for a game
+    #####:  887:        if (commandInt >= 1 && commandInt <= games_count)
+        -:  888:        {
+        -:  889:            char commandString[BUFSIZ];
+    #####:  890:            snprintf(commandString, sizeof(commandString), "JG,%d", game_ids[commandInt - 1]);
+    #####:  891:            commandSender(commandString);
+    #####:  892:            usleep(100000);
+    #####:  893:            message = readFromServer();
+        -:  894:            // Check if the join was successful or not
+        -:  895:            // According to the response call the function again with the proper parameters
+    #####:  896:            if (strcmp(message, "joined") == 0)
+        -:  897:            {
+    #####:  898:                free(message);
+    #####:  899:                message = NULL;
+    #####:  900:                quit = true;
+    #####:  901:                displayWaitingRooms(true, game_ids[commandInt - 1], 0);
+    #####:  902:            }
+    #####:  903:            else if (strcmp(message, "notjoined") == 0)
+        -:  904:            {
+    #####:  905:                free(message);
+    #####:  906:                message = NULL;
+    #####:  907:                quit = true;
+    #####:  908:                displayWaitingRooms(true, game_ids[commandInt - 1], 1);
+    #####:  909:            }
+    #####:  910:        }
+    #####:  911:    } while (!quit);
+    #####:  912:}
+        -:  913:
+        -:  914:// This function is used to display the current state of the game when a player enters
+    #####:  915:void displayGame(int game_id)
+        -:  916:{
+    #####:  917:    clear();
+    #####:  918:    usleep(100000);
+        -:  919:    char commandString[BUFSIZ];
+        -:  920:    // Send the command to the server to get the game info with the ID of the game
+    #####:  921:    snprintf(commandString, sizeof(commandString), "GI,%d", game_id);
+    #####:  922:    commandSender(commandString);
+    #####:  923:    char *message = readFromServer();
+        -:  924:    // Check if the game is started or not
+    #####:  925:    if (strcmp(message, "notstarted") == 0)
+        -:  926:    {
+    #####:  927:        printw(">>> Game #%d has not started yet <<<\n", game_id);
+    #####:  928:        printw("\n");
+    #####:  929:        printw("r - Refresh\n");
+    #####:  930:        printw("b - Back\n");
+    #####:  931:        refresh();
+    #####:  932:        bool quit = false;
+    #####:  933:        free(message);
+    #####:  934:        message = NULL;
+    #####:  935:        do
+        -:  936:        {
+    #####:  937:            char command = (char)getch();
+    #####:  938:            if (command == 'b')
+        -:  939:            {
+    #####:  940:                quit = true;
+    #####:  941:                showMenu();
+    #####:  942:            }
+    #####:  943:            if (command == 'r')
+        -:  944:            {
+    #####:  945:                quit = true;
+    #####:  946:                displayGame(game_id);
+    #####:  947:            }
+    #####:  948:        } while (!quit);
+    #####:  949:    }
+        -:  950:    // This part is for converting the game info string to a Game struct
+        -:  951:
+        -:  952:    // Make a copy of the message to avoid modifying the original string
+    #####:  953:    char *messageCopy = strdup(message);
+    #####:  954:    if (messageCopy == NULL)
+        -:  955:    {
+    #####:  956:        fprintf(stderr, "Memory allocation failed\n");
+    #####:  957:        exit(EXIT_FAILURE);
+        -:  958:    }
+        -:  959:
+        -:  960:    char *token;
+        -:  961:
+        -:  962:    // Create Game struct
+        -:  963:    Game currentGame;
+        -:  964:
+        -:  965:    // Parse number of players
+    #####:  966:    token = strtok(messageCopy, ";");
+    #####:  967:    token = strtok(NULL, ";");
+    #####:  968:    currentGame.num_players = atoi(token);
+        -:  969:
+        -:  970:    // Parse player names
+    #####:  971:    for (int i = 0; i < currentGame.num_players; i++)
+        -:  972:    {
+    #####:  973:        if (i == currentGame.num_players - 1)
+        -:  974:        {
+    #####:  975:            token = strtok(NULL, ";");
+    #####:  976:        }
+        -:  977:        else
+        -:  978:        {
+    #####:  979:            token = strtok(NULL, ",");
+        -:  980:        }
+    #####:  981:        currentGame.playerNames[i] = strdup(token);
+    #####:  982:    }
+        -:  983:
+        -:  984:    // Parse current round and max rounds
+    #####:  985:    token = strtok(NULL, ",");
+    #####:  986:    currentGame.current_round = atoi(token);
+    #####:  987:    token = strtok(NULL, ";");
+    #####:  988:    currentGame.num_rounds = atoi(token);
+        -:  989:
+        -:  990:    // Parse player scores
+    #####:  991:    for (int i = 0; i < currentGame.num_players; i++)
+        -:  992:    {
+    #####:  993:        if (i == currentGame.num_players - 1)
+        -:  994:        {
+    #####:  995:            token = strtok(NULL, ";");
+    #####:  996:        }
+        -:  997:        else
+        -:  998:        {
+    #####:  999:            token = strtok(NULL, ",");
+        -: 1000:        }
+    #####: 1001:        currentGame.playerScores[i] = atoi(strdup(token));
+    #####: 1002:    }
+        -: 1003:
+        -: 1004:    // Parse round data
+    #####: 1005:    for (int i = 0; i < currentGame.current_round; i++)
+        -: 1006:    {
+    #####: 1007:        if (i == currentGame.current_round - 1)
+        -: 1008:        {
+    #####: 1009:            token = strtok(NULL, ";");
+    #####: 1010:        }
+        -: 1011:        else
+        -: 1012:        {
+    #####: 1013:            token = strtok(NULL, ",");
+        -: 1014:        }
+    #####: 1015:        currentGame.roundData[i] = strdup(token);
+    #####: 1016:    }
+    #####: 1017:    free(messageCopy);
+    #####: 1018:    messageCopy = NULL;
+        -: 1019:
+        -: 1020:    // The displaying starts here
+        -: 1021:
+        -: 1022:    // Calculate the length of the separation line
+    #####: 1023:    int sepLineLength = 8 * (currentGame.num_players) + 9;
+        -: 1024:
+        -: 1025:    // Create the separation line
+    #####: 1026:    char sepLine[sepLineLength + 1]; // +1 for the null terminator
+    #####: 1027:    for (int i = 0; i < sepLineLength; i++)
+        -: 1028:    {
+    #####: 1029:        sepLine[i] = '-';
+    #####: 1030:    }
+    #####: 1031:    sepLine[sepLineLength] = '\0';
+        -: 1032:
+    #####: 1033:    if (currentGame.current_round > currentGame.num_rounds)
+        -: 1034:    {
+        -: 1035:        // If the game is finished display the finished game
+    #####: 1036:        printw("Game #%d - Finished\n", game_id);
+    #####: 1037:        printw("\n%s\n", sepLine);
+    #####: 1038:        printw("| Round |");
+        -: 1039:        // Display player names
+    #####: 1040:        for (int i = 0; i < currentGame.num_players; i++)
+        -: 1041:        {
+    #####: 1042:            printw(" %-5s |", currentGame.playerNames[i]);
+    #####: 1043:        }
+    #####: 1044:        printw("\n%s\n", sepLine);
+    #####: 1045:        refresh();
+        -: 1046:        // Display round data
+    #####: 1047:        for (int i = 0; i < currentGame.num_rounds; i++)
+        -: 1048:        {
+    #####: 1049:            printw("| %5d |", i + 1);
+        -: 1050:            // Tokenize the roundData string to extract each player's decision
+    #####: 1051:            for (int j = 0; j < currentGame.num_players; j++)
+        -: 1052:            {
+    #####: 1053:                if (currentGame.roundData[i][j] == 'n')
+        -: 1054:                {
+    #####: 1055:                    printw(" %5c |", ' ');
+    #####: 1056:                }
+        -: 1057:                else
+        -: 1058:                {
+    #####: 1059:                    printw(" %5c |", currentGame.roundData[i][j]);
+        -: 1060:                }
+    #####: 1061:            }
+    #####: 1062:            printw("\n%s\n", sepLine);
+    #####: 1063:        }
+        -: 1064:
+        -: 1065:        // Display player scores
+    #####: 1066:        printw("\n%s\n", sepLine);
+    #####: 1067:        printw("|  Pts  |");
+    #####: 1068:        for (int i = 0; i < currentGame.num_players; i++)
+        -: 1069:        {
+    #####: 1070:            printw(" %5d |", currentGame.playerScores[i]);
+    #####: 1071:        }
+    #####: 1072:        printw("\n%s\n", sepLine);
+        -: 1073:
+        -: 1074:        // Display the winner
+    #####: 1075:        printw("\n>>> Game over! Winner(s): ");
+        -: 1076:        // In order to print the winners in the correct order we need to find the max score
+        -: 1077:        // find max score
+    #####: 1078:        int maxScore = 0;
+    #####: 1079:        for (int i = 0; i < currentGame.num_players; i++)
+        -: 1080:        {
+    #####: 1081:            if (currentGame.playerScores[i] > maxScore)
+        -: 1082:            {
+    #####: 1083:                maxScore = currentGame.playerScores[i];
+    #####: 1084:            }
+    #####: 1085:        }
+        -: 1086:        // print winners, only put comma if multiple winners
+    #####: 1087:        int winnerCount = 0;
+    #####: 1088:        for (int i = 0; i < currentGame.num_players; i++)
+        -: 1089:        {
+    #####: 1090:            if (currentGame.playerScores[i] == maxScore)
+        -: 1091:            {
+    #####: 1092:                winnerCount++;
+    #####: 1093:            }
+    #####: 1094:        }
+    #####: 1095:        for (int i = 0; i < currentGame.num_players; i++)
+        -: 1096:        {
+    #####: 1097:            if (currentGame.playerScores[i] == maxScore)
+        -: 1098:            {
+    #####: 1099:                printw("%s", currentGame.playerNames[i]);
+    #####: 1100:                winnerCount--;
+    #####: 1101:                if (winnerCount > 0)
+        -: 1102:                {
+    #####: 1103:                    printw(", ");
+    #####: 1104:                }
+    #####: 1105:            }
+    #####: 1106:        }
+    #####: 1107:        printw("<<<\n");
+        -: 1108:
+        -: 1109:        // Display the options
+    #####: 1110:        printw("\nb - Back\n");
+    #####: 1111:        refresh();
+    #####: 1112:        bool quit = false;
+    #####: 1113:        do
+        -: 1114:        {
+    #####: 1115:            char command = (char)getch();
+        -: 1116:            // Only option from here is to go back to the menu, the player cannot come back here
+    #####: 1117:            if (command == 'b')
+        -: 1118:            {
+    #####: 1119:                quit = true;
+    #####: 1120:                showMenu();
+    #####: 1121:            }
+    #####: 1122:        } while (!quit);
+    #####: 1123:        return;
+        -: 1124:    }
+        -: 1125:
+        -: 1126:    // If the game is not finished display the current state of the game
+    #####: 1127:    printw("Game #%d - Next Round %d/%d\n\n", game_id, currentGame.current_round, currentGame.num_rounds);
+        -: 1128:    // Display the top border of the table
+    #####: 1129:    printw("\n%s\n", sepLine);
+    #####: 1130:    printw("| Round |");
+    #####: 1131:    refresh();
+        -: 1132:    // Display player names
+    #####: 1133:    for (int i = 0; i < currentGame.num_players; i++)
+        -: 1134:    {
+    #####: 1135:        printw(" %-5s |", currentGame.playerNames[i]);
+    #####: 1136:    }
+    #####: 1137:    printw("\n%s\n", sepLine);
+    #####: 1138:    refresh();
+        -: 1139:    // Display round data
+    #####: 1140:    for (int i = 0; i < currentGame.current_round - 1; i++)
+        -: 1141:    {
+    #####: 1142:        printw("| %5d |", i + 1);
+        -: 1143:        // Tokenize the roundData string to extract each players decision
+    #####: 1144:        for (int j = 0; j < currentGame.num_players; j++)
+        -: 1145:        {
+    #####: 1146:            if (currentGame.roundData[i][j] == 'n')
+        -: 1147:            {
+    #####: 1148:                printw(" %5c |", ' ');
+    #####: 1149:            }
+        -: 1150:            else
+        -: 1151:            {
+    #####: 1152:                printw(" %5c |", currentGame.roundData[i][j]);
+        -: 1153:            }
+    #####: 1154:        }
+    #####: 1155:        printw("\n%s\n", sepLine);
+    #####: 1156:    }
+        -: 1157:
+        -: 1158:    // Display player scores
+    #####: 1159:    printw("\n%s\n", sepLine);
+    #####: 1160:    printw("|  Pts  |");
+    #####: 1161:    for (int i = 0; i < currentGame.num_players; i++)
+        -: 1162:    {
+    #####: 1163:        printw(" %5d |", currentGame.playerScores[i]);
+    #####: 1164:    }
+    #####: 1165:    printw("\n%s\n", sepLine);
+        -: 1166:
+        -: 1167:    // check if already made a decision
+    #####: 1168:    bool madeDecision = false;
+    #####: 1169:    for (int i = 0; i < currentGame.num_players; i++)
+        -: 1170:    {
+    #####: 1171:        if (strcmp(currentGame.playerNames[i], client_id) == 0)
+        -: 1172:        {
+    #####: 1173:            if (currentGame.roundData[currentGame.current_round - 1][i] != 'n')
+        -: 1174:            {
+    #####: 1175:                madeDecision = true;
+    #####: 1176:                break;
+        -: 1177:            }
+    #####: 1178:        }
+    #####: 1179:    }
+    #####: 1180:    if (!madeDecision)
+        -: 1181:    {
+        -: 1182:        // If not, display the options
+    #####: 1183:        printw("\np - Choose \"Paper\"\n");
+    #####: 1184:        printw("r - Choose \"Rock\"\n");
+    #####: 1185:        printw("s - Choose \"Scissor\"\n\n");
+    #####: 1186:        printw("b - Back\n");
+    #####: 1187:        refresh();
+        -: 1188:
+        -: 1189:        // Handle user input
+    #####: 1190:        bool quit = false;
+    #####: 1191:        do
+        -: 1192:        {
+    #####: 1193:            char command = (char)getch();
+    #####: 1194:            if (command == 'b')
+        -: 1195:            {
+    #####: 1196:                quit = true;
+    #####: 1197:                showMenu();
+    #####: 1198:            }
+    #####: 1199:            if (command == 'p' || command == 'r' || command == 's')
+        -: 1200:            {
+        -: 1201:                // Send the decision to the server
+    #####: 1202:                commandString[0] = '\0';
+    #####: 1203:                snprintf(commandString, sizeof(commandString), "MD,%d,%c", game_id, command);
+    #####: 1204:                commandSender(commandString);
+    #####: 1205:                quit = true;
+    #####: 1206:                usleep(100000);
+        -: 1207:                // After sending the decision restart the function to display the updated game
+    #####: 1208:                displayGame(game_id);
+    #####: 1209:            }
+    #####: 1210:        } while (!quit);
+    #####: 1211:    }
+        -: 1212:    else
+        -: 1213:    {
+        -: 1214:        // check what the player chose
+        -: 1215:        char playerDecision;
+    #####: 1216:        playerDecision = '\0';
+    #####: 1217:        for (int i = 0; i < currentGame.num_players; i++)
+        -: 1218:        {
+    #####: 1219:            if (strcmp(currentGame.playerNames[i], client_id) == 0)
+        -: 1220:            {
+    #####: 1221:                playerDecision = currentGame.roundData[currentGame.current_round - 1][i];
+    #####: 1222:                break;
+        -: 1223:            }
+    #####: 1224:        }
+    #####: 1225:        printw("\n");
+        -: 1226:        // Display the player's decision
+    #####: 1227:        if (playerDecision == 'p')
+        -: 1228:        {
+    #####: 1229:            printw(">>> You have chosen paper <<<\n");
+    #####: 1230:        }
+    #####: 1231:        else if (playerDecision == 'r')
+        -: 1232:        {
+    #####: 1233:            printw(">>> You have chosen rock <<<\n");
+    #####: 1234:        }
+    #####: 1235:        else if (playerDecision == 's')
+        -: 1236:        {
+    #####: 1237:            printw(">>> You have chosen scissor <<<\n");
+    #####: 1238:        }
+        -: 1239:
+        -: 1240:        // Display the options
+    #####: 1241:        printw("\nr - Refresh\n");
+    #####: 1242:        printw("b - Back\n");
+    #####: 1243:        refresh();
+        -: 1244:
+        -: 1245:        // Handle user input
+    #####: 1246:        bool quit = false;
+    #####: 1247:        do
+        -: 1248:        {
+    #####: 1249:            char command = (char)getch();
+    #####: 1250:            if (command == 'b')
+        -: 1251:            {
+        -: 1252:                // The player can go back to the menu
+    #####: 1253:                quit = true;
+    #####: 1254:                showMenu();
+    #####: 1255:            }
+    #####: 1256:            if (command == 'r')
+        -: 1257:            {
+        -: 1258:                // Or refresh the game to see if the other players made their decisions
+    #####: 1259:                quit = true;
+    #####: 1260:                displayGame(game_id);
+    #####: 1261:            }
+    #####: 1262:        } while (!quit);
+        -: 1263:    }
+    #####: 1264:}
+        -: 1265:
+        -: 1266:// This function is to display the games that the player is joined
+    #####: 1267:void showCurrentGames(void)
+        -: 1268:{
+    #####: 1269:    clear();
+    #####: 1270:    printw("Here's the list of games you can play:\n");
+    #####: 1271:    printw("\n");
+    #####: 1272:    commandSender("SG");
+    #####: 1273:    char *message = readFromServer();
+        -: 1274:    char *saveptr1;
+    #####: 1275:    char *token = strtok_r(message, ",", &saveptr1);
+        -: 1276:    int game_ids[BUFSIZ];
+    #####: 1277:    int games_count = 0;
+    #####: 1278:    while (token != NULL)
+        -: 1279:    {
+    #####: 1280:        game_ids[games_count] = atoi(token);
+    #####: 1281:        games_count++;
+    #####: 1282:        token = strtok_r(NULL, ",", &saveptr1);
+        -: 1283:    }
+    #####: 1284:    if (games_count == 0)
+        -: 1285:    {
+    #####: 1286:        printw("Sorry. There are no games you can play");
+    #####: 1287:        printw("\n");
+    #####: 1288:    }
+    #####: 1289:    for (int i = 0; i < games_count; i++)
+        -: 1290:    {
+    #####: 1291:        printw("%d - Game #%d\n", i + 1, game_ids[i]);
+    #####: 1292:    }
+    #####: 1293:    printw("\n");
+    #####: 1294:    printw("b - Back\n");
+    #####: 1295:    refresh();
+    #####: 1296:    bool quit = false;
+    #####: 1297:    free(message);
+    #####: 1298:    message = NULL;
+    #####: 1299:    do
+        -: 1300:    {
+    #####: 1301:        char command = (char)getch(); // Wait for a key press
+    #####: 1302:        if (command == 'b')
+        -: 1303:        {
+    #####: 1304:            quit = true;
+    #####: 1305:            showMenu();
+    #####: 1306:        }
+    #####: 1307:        int commandInt = command - '0';
+        -: 1308:        // Check if the key pressed is a number key and if it is a valid number key for a game
+        -: 1309:        // If yes step into the game
+    #####: 1310:        if (commandInt >= 1 && commandInt <= games_count)
+        -: 1311:        {
+    #####: 1312:            quit = true;
+    #####: 1313:            displayGame(game_ids[commandInt - 1]);
+    #####: 1314:        }
+    #####: 1315:    } while (!quit);
+    #####: 1316:}
+        -: 1317:
+        -: 1318:// This function is used to create a new game
+    #####: 1319:void createNewGame(void)
+        -: 1320:{
+    #####: 1321:    clear();
+    #####: 1322:    printw("2:5 - How many players will play the game? min: 2 - max: 5\n");
+    #####: 1323:    printw("\n");
+    #####: 1324:    printw("b - Back\n");
+    #####: 1325:    refresh();
+    #####: 1326:    bool quit = false;
+    #####: 1327:    int playersn = 0;
+    #####: 1328:    bool gamecreated = false;
+    #####: 1329:    bool secondquestion = false;
+    #####: 1330:    do
+        -: 1331:    {
+    #####: 1332:        char command = (char)getch();
+        -: 1333:        // If the player presses b check witch state of the game creation he is in
+    #####: 1334:        if (command == 'b')
+        -: 1335:        {
+        -: 1336:            // If they already entered the player number go back to the first question
+    #####: 1337:            if (secondquestion)
+        -: 1338:            {
+    #####: 1339:                createNewGame();
+    #####: 1340:                quit = true;
+    #####: 1341:            }
+        -: 1342:            else
+        -: 1343:            {
+    #####: 1344:                showMenu();
+    #####: 1345:                quit = true;
+        -: 1346:            }
+    #####: 1347:        }
+        -: 1348:        // If the number of entered players is valid go to the next question
+    #####: 1349:        else if (playersn == 0 && atoi(&command) >= 2 && atoi(&command) <= 5 && !gamecreated)
+        -: 1350:        {
+    #####: 1351:            secondquestion = true;
+    #####: 1352:            playersn = atoi(&command);
+    #####: 1353:            clear();
+    #####: 1354:            printw("3:5 - How many rounds will the game have? min: 3 - max: 5\n");
+    #####: 1355:            printw("\n");
+    #####: 1356:            printw("b - Back\n");
+    #####: 1357:            refresh();
+    #####: 1358:        }
+        -: 1359:        // If the game way created display a message about it
+    #####: 1360:        else if (playersn != 0 && atoi(&command) >= 3 && atoi(&command) <= 5 && !gamecreated)
+        -: 1361:        {
+    #####: 1362:            int rounds = atoi(&command);
+        -: 1363:            char commandString[BUFSIZ];
+    #####: 1364:            snprintf(commandString, sizeof(commandString), "NG,%d,%d", playersn, rounds);
+    #####: 1365:            commandSender(commandString);
+    #####: 1366:            secondquestion = false;
+    #####: 1367:            clear();
+    #####: 1368:            printw("Game created, you can join from the menu\n");
+    #####: 1369:            printw("\n");
+    #####: 1370:            printw("b - Back\n");
+    #####: 1371:            refresh();
+    #####: 1372:            gamecreated = true;
+    #####: 1373:        }
+    #####: 1374:    } while (!quit);
+    #####: 1375:}
+        -: 1376:
+        -: 1377:// This function is used to show the leaderboard
+    #####: 1378:void showLeaderboard(void)
+        -: 1379:{
+        -: 1380:    // Ask the server for the leaderboard
+    #####: 1381:    commandSender("4L");
+    #####: 1382:    clear();
+    #####: 1383:    printw("Leaderboard\n");
+    #####: 1384:    printw("\n");
+    #####: 1385:    refresh();
+        -: 1386:    char currentPlayer[BUFSIZ];
+    #####: 1387:    strcpy(currentPlayer, client_id);
+    #####: 1388:    char *message = readFromServer();
+        -: 1389:    // Call the parseMessage function to parse the leaderboard string
+    #####: 1390:    parseMessage(message, currentPlayer);
+    #####: 1391:    bool quit = false;
+    #####: 1392:    do
+        -: 1393:    {
+    #####: 1394:        char command = (char)getch(); // Wait for a key press
+    #####: 1395:        switch (command)
+        -: 1396:        {
+        -: 1397:        case 'b':
+    #####: 1398:            quit = true;
+    #####: 1399:            showMenu();
+    #####: 1400:            break;
+        -: 1401:        default:
+    #####: 1402:            break;
+        -: 1403:        }
+    #####: 1404:    } while (!quit);
+    #####: 1405:}
+        -: 1406:
+        -: 1407:// This function is used to get out the information about a game to be able to sort it properly.
+    #####: 1408:void parseMessage(char *message, char *currentPlayer)
+        -: 1409:{
+        -: 1410:    Player currentPlayers[MAX_PLAYERS];
+    #####: 1411:    int playerCount = 0;
+        -: 1412:
+        -: 1413:    char *saveptr1, *saveptr2;
+    #####: 1414:    char *playerToken = strtok_r(message, ";", &saveptr1);
+    #####: 1415:    while (playerToken != NULL)
+        -: 1416:    {
+    #####: 1417:        char *name = strtok_r(playerToken, ",", &saveptr2);
+    #####: 1418:        char *score = strtok_r(NULL, ",", &saveptr2);
+    #####: 1419:        char *matches = strtok_r(NULL, ",", &saveptr2);
+        -: 1420:
+    #####: 1421:        strncpy(currentPlayers[playerCount].name, name, sizeof(currentPlayers[playerCount].name));
+    #####: 1422:        currentPlayers[playerCount].score = atoi(score);
+    #####: 1423:        currentPlayers[playerCount].matches = atoi(matches);
+        -: 1424:
+    #####: 1425:        playerCount++;
+        -: 1426:
+    #####: 1427:        playerToken = strtok_r(NULL, ";", &saveptr1);
+        -: 1428:    }
+        -: 1429:    // Send the information to the printLeaderboard function
+    #####: 1430:    printLeaderboard(currentPlayers, playerCount, currentPlayer);
+    #####: 1431:    free(message);
+    #####: 1432:    message = NULL;
+    #####: 1433:}
+        -: 1434:
+    #####: 1435:void printLeaderboard(Player currentPlayers[], int size, char *currentPlayer)
+        -: 1436:{
+        -: 1437:    // Sort the players based on the score and name
+    #####: 1438:    qsort(currentPlayers, (size_t)size, sizeof(Player), compare);
+        -: 1439:    // Display all information in the correct format
+    #####: 1440:    printw("-----------------------------------\n");
+    #####: 1441:    printw("| Rank | Player | Score | Matches |\n");
+    #####: 1442:    printw("-----------------------------------\n");
+        -: 1443:    // Check the number of players
+    #####: 1444:    int topPlayers = size < 3 ? size : 3;
+        -: 1445:    // Display the top 3 players first. If the current player is not in the top 3 display it after the top 3.
+    #####: 1446:    for (int i = 0; i < topPlayers; i++)
+        -: 1447:    {
+    #####: 1448:        printw("| %s %2d | %6s | %5d | %7d |\n", strcmp(currentPlayers[i].name, currentPlayer) == 0 ? "*" : " ", i + 1, currentPlayers[i].name, currentPlayers[i].score, currentPlayers[i].matches);
+    #####: 1449:        printw("-----------------------------------\n");
+    #####: 1450:    }
+        -: 1451:    // If the current player is not in the top 3 display it after the top 3.
+    #####: 1452:    if (strcmp(currentPlayers[topPlayers - 1].name, currentPlayer) != 0)
+        -: 1453:    {
+    #####: 1454:        for (int i = topPlayers; i < size; i++)
+        -: 1455:        {
+    #####: 1456:            if (strcmp(currentPlayers[i].name, currentPlayer) == 0)
+        -: 1457:            {
+    #####: 1458:                printw("\n");
+    #####: 1459:                printw("-----------------------------------\n");
+    #####: 1460:                printw("|* %3d | %6s | %5d | %7d |\n", i + 1, currentPlayers[i].name, currentPlayers[i].score, currentPlayers[i].matches);
+    #####: 1461:                printw("-----------------------------------\n");
+    #####: 1462:                break;
+        -: 1463:            }
+    #####: 1464:        }
+    #####: 1465:    }
+    #####: 1466:    printw("\n");
+    #####: 1467:    printw("b - Back\n");
+    #####: 1468:    refresh();
+    #####: 1469:}
+        -: 1470:
+        -: 1471:// This function is used to compare two players based on their score and name
+    #####: 1472:int compare(const void *a, const void *b)
+        -: 1473:{
+    #####: 1474:    Player *playerA = (Player *)a;
+    #####: 1475:    Player *playerB = (Player *)b;
+        -: 1476:
+    #####: 1477:    if (playerA->score != playerB->score)
+    #####: 1478:        return playerB->score - playerA->score;
+        -: 1479:
+    #####: 1480:    return strcmp(playerA->name, playerB->name);
+    #####: 1481:}
+        -: 1482:
+        -: 1483:// This function initializes the client
+    #####: 1484:void client(const char *id)
+        -: 1485:{
+        -: 1486:    // Setup for ncurses library
+    #####: 1487:    initscr();            // Initialize the ncurses library
+    #####: 1488:    cbreak();             // Disable line buffering
+    #####: 1489:    noecho();             // Don't echo the typed characters
+    #####: 1490:    keypad(stdscr, TRUE); // Enable function keys and arrow keys
+        -: 1491:
+    #####: 1492:    pipe_fd = open(FIFO_FILE, O_WRONLY);
+    #####: 1493:    client_id = id;
+        -: 1494:
+    #####: 1495:    signal(SIGINT, handle_client_sigint);   // Register the SIGINT signal handler
+    #####: 1496:    signal(SIGTERM, handle_client_sigterm); // Register the SIGTERM signal handler
+    #####: 1497:    signal(SIGPIPE, handle_sigpipe);        // Register the SIGPIPE signal handler
+        -: 1498:
+        -: 1499:    // Try to connect to the server
+    #####: 1500:    commandSender("C");
+    #####: 1501:    usleep(10000);
+        -: 1502:    // check response
+    #####: 1503:    char *message = readFromServer();
+    #####: 1504:    if (strcmp(message, "registered") == 0)
+        -: 1505:    {
+    #####: 1506:        free(message);
+    #####: 1507:        message = NULL;
+    #####: 1508:        showMenu();
+    #####: 1509:    }
+        -: 1510:    // If there is already a client with this name the player cant join.
+        -: 1511:    else
+        -: 1512:    {
+    #####: 1513:        clear();
+    #####: 1514:        printw("Error: Client with this name already exists\n");
+    #####: 1515:        refresh();
+    #####: 1516:        free(message);
+    #####: 1517:        message = NULL;
+    #####: 1518:        sleep(1);
+    #####: 1519:        exit(1);
+        -: 1520:    }
+    #####: 1521:}
